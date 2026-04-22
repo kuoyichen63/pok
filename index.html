@@ -1,0 +1,687 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>寶可夢探索 GO (PokeMap Explorer)</title>
+    
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
+
+    <style>
+        body, html {
+            margin: 0; padding: 0; width: 100%; height: 100%;
+            overflow: hidden; font-family: 'Inter', 'Noto Sans TC', sans-serif;
+            background-color: #a7f3d0; /* Grass green background fallback */
+        }
+        
+        #map {
+            width: 100vw; height: 100vh; z-index: 1;
+            /* 讓地圖看起來更像遊戲 (提高飽和度與一點色相偏移) */
+            filter: saturate(1.2) contrast(1.1) hue-rotate(5deg);
+        }
+        .leaflet-container:focus { outline: none; }
+
+        /* 隱藏 Leaflet 版權宣告以求遊戲畫面乾淨，但保留在 info 按鈕中較好，這裡簡化處理 */
+        .leaflet-control-attribution { display: none; }
+
+        /* --- 遊戲角色與寶可夢標記動畫 --- */
+        .player-marker {
+            font-size: 32px;
+            text-align: center;
+            line-height: 32px;
+            filter: drop-shadow(0px 4px 4px rgba(0,0,0,0.4));
+            animation: bounce-slight 2s infinite ease-in-out;
+            position: relative;
+        }
+        .player-radar {
+            position: absolute;
+            top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            width: 80px; height: 80px;
+            background-color: rgba(59, 130, 246, 0.2);
+            border: 2px solid rgba(59, 130, 246, 0.5);
+            border-radius: 50%;
+            animation: radar-pulse 3s infinite linear;
+            z-index: -1;
+            pointer-events: none;
+        }
+
+        .pokemon-marker {
+            font-size: 36px;
+            text-align: center;
+            line-height: 36px;
+            cursor: pointer;
+            filter: drop-shadow(0px 4px 2px rgba(0,0,0,0.3));
+            transition: transform 0.2s;
+        }
+        .pokemon-marker:active { transform: scale(0.8); }
+        .pokemon-marker.rare { animation: float-bounce 1.5s infinite ease-in-out, glow-rare 2s infinite alternate; }
+        .pokemon-marker.epic { animation: float-bounce 1s infinite ease-in-out, glow-epic 1.5s infinite alternate; }
+
+        @keyframes bounce-slight {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-5px); }
+        }
+        @keyframes float-bounce {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-10px); }
+        }
+        @keyframes radar-pulse {
+            0% { transform: translate(-50%, -50%) scale(0.5); opacity: 1; }
+            100% { transform: translate(-50%, -50%) scale(2); opacity: 0; }
+        }
+        @keyframes glow-rare {
+            from { filter: drop-shadow(0 0 5px #facc15) drop-shadow(0px 4px 2px rgba(0,0,0,0.3)); }
+            to { filter: drop-shadow(0 0 15px #facc15) drop-shadow(0px 4px 2px rgba(0,0,0,0.3)); }
+        }
+        @keyframes glow-epic {
+            from { filter: drop-shadow(0 0 10px #c084fc) drop-shadow(0px 4px 2px rgba(0,0,0,0.3)); }
+            to { filter: drop-shadow(0 0 25px #c084fc) drop-shadow(0px 4px 2px rgba(0,0,0,0.3)); }
+        }
+
+        /* 遊戲專屬字體特效 */
+        .game-title {
+            text-shadow: 2px 2px 0px #2563eb, -2px -2px 0px #2563eb, 2px -2px 0px #2563eb, -2px 2px 0px #2563eb;
+            color: white; font-weight: 900; letter-spacing: 1px;
+        }
+
+        #ui-layer { z-index: 1000; pointer-events: none; }
+        .pointer-events-auto { pointer-events: auto; }
+        
+        .custom-scrollbar::-webkit-scrollbar { width: 6px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: #f1f1f1; border-radius: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+    </style>
+</head>
+<body class="relative">
+
+    <!-- 地圖容器 -->
+    <div id="map"></div>
+
+    <!-- 遊戲 UI 疊加層 -->
+    <div id="ui-layer" class="absolute inset-0 flex flex-col justify-between">
+        
+        <!-- 頂部資訊列 -->
+        <div class="p-4 flex justify-between items-start pointer-events-auto">
+            <div class="bg-white/90 backdrop-blur-sm px-4 py-2 rounded-full shadow-lg border-2 border-blue-400 flex items-center gap-3">
+                <div class="w-10 h-10 bg-blue-100 rounded-full flex items-center justify-center text-xl border border-blue-300 shadow-inner">
+                    👦
+                </div>
+                <div>
+                    <div class="text-xs font-bold text-gray-500 uppercase tracking-wider">訓練家等級 <span id="player-level">1</span></div>
+                    <div class="font-black text-blue-700 leading-tight">探索者</div>
+                </div>
+            </div>
+
+            <button onclick="toggleMockGPS()" class="bg-purple-600/90 text-white w-12 h-12 rounded-full shadow-lg border-2 border-purple-300 flex items-center justify-center text-xl active:scale-95 transition-transform" title="開發者模式：點擊地圖移動">
+                <i class="fa-solid fa-gamepad"></i>
+            </button>
+        </div>
+
+        <!-- 底部操作列 -->
+        <div class="p-6 flex justify-between items-end pointer-events-auto">
+            <!-- 左下角：背包/圖鑑 -->
+            <button onclick="openPokedex()" class="bg-red-500 hover:bg-red-600 text-white w-16 h-16 rounded-full shadow-[0_8px_0_#b91c1c] active:shadow-[0_0px_0_#b91c1c] active:translate-y-2 flex flex-col items-center justify-center transition-all border-4 border-white">
+                <i class="fa-solid fa-book-open text-xl mb-0.5"></i>
+                <span class="text-[10px] font-bold">圖鑑</span>
+            </button>
+
+            <!-- 右下角：指南針/重新定位 -->
+            <button onclick="centerOnPlayer()" class="bg-white text-blue-600 w-14 h-14 rounded-full shadow-lg flex items-center justify-center text-2xl active:scale-95 transition-transform border-2 border-gray-200">
+                <i class="fa-solid fa-location-crosshairs"></i>
+            </button>
+        </div>
+    </div>
+
+    <!-- 圖鑑彈出視窗 (預設隱藏) -->
+    <div id="pokedex-modal" class="fixed inset-0 bg-black/60 z-[2000] hidden flex-col justify-end md:justify-center items-center backdrop-blur-sm transition-opacity">
+        <div class="bg-white w-full md:w-[400px] h-[80vh] md:h-[600px] rounded-t-3xl md:rounded-3xl shadow-2xl flex flex-col transform transition-transform translate-y-full md:translate-y-0" id="pokedex-content">
+            
+            <!-- 標頭 -->
+            <div class="bg-red-500 p-4 rounded-t-3xl text-white flex justify-between items-center border-b-4 border-red-700 relative overflow-hidden">
+                <div class="absolute -right-4 -top-4 text-red-600/30 text-6xl rotate-12"><i class="fa-solid fa-compact-disc"></i></div>
+                <h2 class="text-2xl font-black flex items-center gap-2 relative z-10">
+                    <i class="fa-solid fa-tablet-screen-button"></i> 寶可夢圖鑑
+                </h2>
+                <button onclick="closePokedex()" class="w-8 h-8 bg-red-700 rounded-full flex items-center justify-center hover:bg-red-800 transition-colors relative z-10">
+                    <i class="fa-solid fa-xmark"></i>
+                </button>
+            </div>
+
+            <!-- 統計數據 -->
+            <div class="bg-gray-100 p-3 flex justify-around text-center border-b border-gray-200 shadow-inner">
+                <div>
+                    <div class="text-xs text-gray-500 font-bold">已捕獲數量</div>
+                    <div class="text-xl font-black text-gray-800" id="catch-count">0</div>
+                </div>
+                <div class="w-px bg-gray-300"></div>
+                <div>
+                    <div class="text-xs text-gray-500 font-bold">圖鑑解鎖率</div>
+                    <div class="text-xl font-black text-gray-800" id="pokedex-progress">0%</div>
+                </div>
+            </div>
+
+            <!-- 網格列表 -->
+            <div class="flex-1 overflow-y-auto custom-scrollbar p-4 bg-gray-50">
+                <div id="pokedex-empty" class="h-full flex flex-col items-center justify-center text-gray-400 opacity-60">
+                    <i class="fa-solid fa-box-open text-6xl mb-4"></i>
+                    <p class="font-bold">背包空空如也</p>
+                    <p class="text-sm">趕快去外面走走抓寶吧！</p>
+                </div>
+                <div id="pokedex-grid" class="grid grid-cols-3 gap-3">
+                    <!-- 動態生成捕捉紀錄 -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 捕捉互動視窗 (預設隱藏) -->
+    <div id="catch-modal" class="fixed inset-0 z-[3000] hidden flex-col justify-center items-center bg-black/40 backdrop-blur-sm">
+        <div class="bg-white rounded-3xl p-6 flex flex-col items-center text-center max-w-[300px] w-full shadow-2xl transform scale-90 transition-transform" id="catch-content">
+            <h3 class="text-lg font-bold text-gray-500 mb-2">野生的寶可夢出現了！</h3>
+            <div id="catch-emoji" class="text-7xl mb-4 animate-bounce">🐛</div>
+            <h2 id="catch-name" class="text-2xl font-black text-gray-800 mb-6">綠毛蟲</h2>
+            
+            <div class="w-full flex gap-3">
+                <button onclick="closeCatchModal()" class="flex-1 py-3 bg-gray-200 text-gray-600 rounded-2xl font-bold hover:bg-gray-300 transition-colors">逃跑</button>
+                <button onclick="executeCatch()" class="flex-[2] py-3 bg-red-500 text-white rounded-2xl font-bold text-lg hover:bg-red-600 shadow-[0_4px_0_#b91c1c] active:shadow-[0_0px_0_#b91c1c] active:translate-y-1 transition-all flex justify-center items-center gap-2">
+                    <i class="fa-solid fa-crosshairs"></i> 丟球！
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 訊息提示 Toast 容器 -->
+    <div id="toast-container" class="fixed top-20 left-1/2 transform -translate-x-1/2 z-[4000] flex flex-col gap-2 pointer-events-none w-full max-w-sm px-4"></div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, onSnapshot, collection } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- Firebase 環境設定 ---
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'nlsc-my-maps';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : { projectId: "demo-project" };
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        let userId = null;
+
+        // --- 遊戲資料庫 (圖鑑庫) ---
+        const POKEMON_DB = [
+            { id: 1, name: '綠毛蟲', emoji: '🐛', rarity: 'common', catchRate: 0.9 },
+            { id: 2, name: '波波', emoji: '🐦', rarity: 'common', catchRate: 0.9 },
+            { id: 3, name: '小拉達', emoji: '🐀', rarity: 'common', catchRate: 0.9 },
+            { id: 4, name: '阿柏蛇', emoji: '🐍', rarity: 'uncommon', catchRate: 0.7 },
+            { id: 5, name: '喵喵', emoji: '🐱', rarity: 'uncommon', catchRate: 0.7 },
+            { id: 6, name: '猴怪', emoji: '🐒', rarity: 'uncommon', catchRate: 0.7 },
+            { id: 7, name: '妙蛙種子', emoji: '🐸', rarity: 'rare', catchRate: 0.4 },
+            { id: 8, name: '傑尼龜', emoji: '🐢', rarity: 'rare', catchRate: 0.4 },
+            { id: 9, name: '小火龍', emoji: '🔥', rarity: 'rare', catchRate: 0.4 },
+            { id: 10, name: '皮卡丘', emoji: '⚡', rarity: 'epic', catchRate: 0.2 },
+            { id: 11, name: '迷你龍', emoji: '🐉', rarity: 'epic', catchRate: 0.15 },
+            { id: 12, name: '耿鬼', emoji: '👻', rarity: 'epic', catchRate: 0.1 }
+        ];
+
+        // --- 遊戲狀態 ---
+        let map;
+        let playerMarker = null;
+        let playerLatLng = null;
+        let geoWatchId = null;
+        let mockGpsEnabled = false; // 開發者模式：點擊移動
+        
+        let spawnedPokemons = []; // 畫面上存活的寶可夢
+        let pokemonLayer = null;
+        let caughtInventory = []; // 從 Firebase 讀取的已捕獲資料
+
+        let currentTargetPokemon = null; // 正在捕捉的對象
+
+        // 參數設定
+        const SPAWN_RADIUS = 300; // 生成半徑(公尺)
+        const CATCH_RADIUS = 50;  // 可捕捉距離(公尺)
+        const MAX_SPAWNS = 8;     // 畫面上最多幾隻
+
+        function initMap() {
+            // 預設中心點 (台北車站)
+            map = L.map('map', {
+                center: [25.0478, 121.5170],
+                zoom: 17,
+                zoomControl: false, // 隱藏縮放鈕，遊戲感更強
+                dragging: true,
+                doubleClickZoom: false
+            });
+
+            // 使用無標籤地圖或通用電子地圖
+            L.tileLayer('https://wmts.nlsc.gov.tw/wmts/EMAP/default/GoogleMapsCompatible/{z}/{y}/{x}', {
+                maxZoom: 20
+            }).addTo(map);
+
+            pokemonLayer = L.layerGroup().addTo(map);
+
+            // 玩家圖示設定
+            const playerIcon = L.divIcon({
+                className: '',
+                html: `
+                    <div class="player-marker">👦</div>
+                    <div class="player-radar"></div>
+                `,
+                iconSize: [40, 40],
+                iconAnchor: [20, 20]
+            });
+            
+            playerMarker = L.marker([25.0478, 121.5170], { icon: playerIcon, zIndexOffset: 1000 }).addTo(map);
+            
+            // 地圖點擊事件 (用於開發者模式模擬移動)
+            map.on('click', (e) => {
+                if (mockGpsEnabled) {
+                    updatePlayerPosition(e.latlng.lat, e.latlng.lng, true);
+                    window.showToast("👟 模擬走動", "success");
+                }
+            });
+
+            // 啟動遊戲循環與定位
+            startGeolocation();
+            setInterval(gameLoop, 5000); // 每 5 秒檢查生成
+        }
+
+        function startGeolocation() {
+            // 先給予一個初始預設位置 (這裡設定在高雄，避免畫面卡在空白處等待)
+            if (!playerLatLng) {
+                updatePlayerPosition(22.6543, 120.3473, true); 
+            }
+
+            if (!navigator.geolocation) {
+                window.showToast("你的設備不支援 GPS 定位，已切換為手動點擊移動模式！", "error");
+                if (!mockGpsEnabled) toggleMockGPS();
+                return;
+            }
+            
+            window.showToast("📡 正在請求衛星定位授權...", "info");
+            
+            geoWatchId = navigator.geolocation.watchPosition(
+                (position) => {
+                    if(mockGpsEnabled) return; // 如果開啟了模擬，忽略真實 GPS
+                    updatePlayerPosition(position.coords.latitude, position.coords.longitude, false);
+                },
+                (error) => {
+                    console.error("GPS Error", error);
+                    let errorMsg = "無法獲取位置。";
+                    switch(error.code) {
+                        case error.PERMISSION_DENIED:
+                            errorMsg = "GPS 權限被拒絕 (或環境不支援)。";
+                            break;
+                        case error.POSITION_UNAVAILABLE:
+                            errorMsg = "無法取得位置資訊，可能是訊號不佳。";
+                            break;
+                        case error.TIMEOUT:
+                            errorMsg = "定位逾時，請在開闊區域重試。";
+                            break;
+                    }
+                    
+                    // 顯示錯誤，並自動開啟模擬模式讓玩家繼續玩
+                    window.showToast(errorMsg + " 已自動開啟「點擊地圖移動」模式！", "error");
+                    if (!mockGpsEnabled) {
+                        mockGpsEnabled = true;
+                        window.showToast("🛠️ 點擊地圖任意處即可移動角色前往抓寶", "info");
+                    }
+                },
+                // 放寬精準度要求與超時時間，增加手機獲取定位的成功率
+                { enableHighAccuracy: false, maximumAge: 10000, timeout: 15000 }
+            );
+        }
+
+        // 更新玩家位置
+        function updatePlayerPosition(lat, lng, isMock = false) {
+            const newPos = L.latLng(lat, lng);
+            
+            // 如果是第一次定位，將地圖飛過去
+            if (!playerLatLng) {
+                map.setView(newPos, 18);
+                if(!isMock) {
+                    window.showToast("✅ GPS 定位成功！開始探索吧！", "success");
+                }
+                playerLatLng = newPos;
+                gameLoop(); // 立即生成一次
+            } else {
+                // 平滑移動玩家標記
+                playerMarker.setLatLng(newPos);
+                
+                // 如果玩家走出螢幕，自動跟隨 (簡易版)
+                if(!map.getBounds().contains(newPos)) {
+                    map.panTo(newPos);
+                }
+            }
+            playerLatLng = newPos;
+        }
+
+        window.centerOnPlayer = function() {
+            if (playerLatLng) {
+                map.flyTo(playerLatLng, 18, { duration: 1 });
+            } else {
+                window.showToast("尚未取得定位！");
+            }
+        };
+
+        window.toggleMockGPS = function() {
+            mockGpsEnabled = !mockGpsEnabled;
+            if(mockGpsEnabled) {
+                window.showToast("🛠️ 開發者模式開啟：點擊地圖移動角色", "info");
+            } else {
+                window.showToast("🛠️ 開發者模式關閉：恢復真實 GPS", "info");
+            }
+        };
+
+        // 遊戲主循環 (生成邏輯)
+        function gameLoop() {
+            if (!playerLatLng) return;
+
+            // 清理距離太遠的寶可夢
+            for (let i = spawnedPokemons.length - 1; i >= 0; i--) {
+                const pm = spawnedPokemons[i];
+                if (playerLatLng.distanceTo(pm.marker.getLatLng()) > SPAWN_RADIUS * 1.5) {
+                    pokemonLayer.removeLayer(pm.marker);
+                    spawnedPokemons.splice(i, 1);
+                }
+            }
+
+            // 如果數量不夠，隨機生成
+            if (spawnedPokemons.length < MAX_SPAWNS) {
+                spawnRandomPokemon();
+            }
+        }
+
+        function spawnRandomPokemon() {
+            // 隨機決定要生成的寶可夢
+            const rand = Math.random();
+            let availableList = [];
+            
+            if (rand < 0.1) availableList = POKEMON_DB.filter(p => p.rarity === 'epic');
+            else if (rand < 0.35) availableList = POKEMON_DB.filter(p => p.rarity === 'rare');
+            else if (rand < 0.7) availableList = POKEMON_DB.filter(p => p.rarity === 'uncommon');
+            else availableList = POKEMON_DB.filter(p => p.rarity === 'common');
+
+            const template = availableList[Math.floor(Math.random() * availableList.length)];
+
+            // 在玩家周圍隨機經緯度生成
+            const r = (Math.random() * (SPAWN_RADIUS - 30) + 30) / 111300; // 粗略公尺轉度數
+            const theta = Math.random() * 2 * Math.PI;
+            const spawnLat = playerLatLng.lat + r * Math.cos(theta);
+            const spawnLng = playerLatLng.lng + r * Math.sin(theta) / Math.cos(playerLatLng.lat * Math.PI/180);
+
+            const iconClass = template.rarity === 'epic' || template.rarity === 'rare' ? template.rarity : '';
+            
+            const icon = L.divIcon({
+                className: '',
+                html: `<div class="pokemon-marker ${iconClass}">${template.emoji}</div>`,
+                iconSize: [40, 40],
+                iconAnchor: [20, 20]
+            });
+
+            const marker = L.marker([spawnLat, spawnLng], { icon }).addTo(pokemonLayer);
+            
+            const spawnData = {
+                id: `spawn_${Date.now()}_${Math.floor(Math.random()*1000)}`,
+                templateId: template.id,
+                name: template.name,
+                emoji: template.emoji,
+                rarity: template.rarity,
+                catchRate: template.catchRate,
+                marker: marker
+            };
+
+            // 綁定點擊事件
+            marker.on('click', () => handlePokemonClick(spawnData));
+            spawnedPokemons.push(spawnData);
+        }
+
+        function handlePokemonClick(pokemon) {
+            if (!playerLatLng) return;
+
+            const dist = playerLatLng.distanceTo(pokemon.marker.getLatLng());
+            
+            if (dist > CATCH_RADIUS) {
+                window.showToast(`⚠️ 距離太遠了！請靠近到 ${CATCH_RADIUS} 公尺內。 (相距 ${Math.round(dist)}m)`, "error");
+                
+                // 將地圖中心移向寶可夢與玩家之間，暗示玩家走過去
+                map.flyToBounds(L.latLngBounds([playerLatLng, pokemon.marker.getLatLng()]), { padding: [50, 50], duration: 0.5 });
+                return;
+            }
+
+            // 進入捕捉畫面
+            currentTargetPokemon = pokemon;
+            const modal = document.getElementById('catch-modal');
+            const content = document.getElementById('catch-content');
+            
+            document.getElementById('catch-emoji').textContent = pokemon.emoji;
+            document.getElementById('catch-name').textContent = pokemon.name;
+            
+            // 設定標題顏色與稀有度特效
+            const nameEl = document.getElementById('catch-name');
+            nameEl.className = "text-2xl font-black mb-6"; // reset
+            if(pokemon.rarity === 'epic') nameEl.classList.add('text-purple-600', 'drop-shadow-md');
+            else if(pokemon.rarity === 'rare') nameEl.classList.add('text-yellow-500', 'drop-shadow-md');
+            else nameEl.classList.add('text-gray-800');
+
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
+            
+            // 彈出動畫
+            requestAnimationFrame(() => {
+                content.classList.remove('scale-90');
+                content.classList.add('scale-100');
+            });
+        }
+
+        window.closeCatchModal = function() {
+            const modal = document.getElementById('catch-modal');
+            const content = document.getElementById('catch-content');
+            content.classList.remove('scale-100');
+            content.classList.add('scale-90');
+            setTimeout(() => {
+                modal.classList.add('hidden');
+                modal.classList.remove('flex');
+                currentTargetPokemon = null;
+            }, 200);
+        };
+
+        window.executeCatch = async function() {
+            if (!currentTargetPokemon) return;
+            
+            const p = currentTargetPokemon;
+            const btn = document.querySelector('#catch-modal button.bg-red-500');
+            btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> 捕捉中...';
+            btn.disabled = true;
+
+            // 模擬動畫延遲
+            await new Promise(r => setTimeout(r, 1500));
+
+            const isCaught = Math.random() < p.catchRate;
+
+            if (isCaught) {
+                window.showToast(`🎉 成功捕捉到 ${p.name}！`, "success");
+                
+                // 從地圖移除
+                pokemonLayer.removeLayer(p.marker);
+                spawnedPokemons = spawnedPokemons.filter(sp => sp.id !== p.id);
+                
+                // 存入 Firebase
+                saveCaughtPokemon(p);
+                
+            } else {
+                window.showToast(`💨 哎呀！${p.name} 掙脫了並逃跑了！`, "error");
+                // 從地圖移除 (逃跑)
+                pokemonLayer.removeLayer(p.marker);
+                spawnedPokemons = spawnedPokemons.filter(sp => sp.id !== p.id);
+            }
+
+            // 恢復按鈕狀態並關閉
+            btn.innerHTML = '<i class="fa-solid fa-crosshairs"></i> 丟球！';
+            btn.disabled = false;
+            window.closeCatchModal();
+        };
+
+        function loadInventoryFromFirebase() {
+            if (!userId) return;
+            // 借用原有的 places 集合，但改存 pokemon 資料格式
+            const invRef = collection(db, 'artifacts', appId, 'users', userId, 'pokemon_inventory');
+            
+            onSnapshot(invRef, (snapshot) => {
+                caughtInventory = [];
+                snapshot.forEach(doc => {
+                    caughtInventory.push({ docId: doc.id, ...doc.data() });
+                });
+                
+                // 更新UI與等級
+                updatePlayerStats();
+                renderPokedexGrid();
+            }, (error) => {
+                console.error("Inventory Fetch Error:", error);
+            });
+        }
+
+        async function saveCaughtPokemon(pokemonInfo) {
+            if (!userId) return;
+            const newId = `catch_${Date.now()}`;
+            const docRef = doc(db, 'artifacts', appId, 'users', userId, 'pokemon_inventory', newId);
+            
+            await setDoc(docRef, {
+                templateId: pokemonInfo.templateId,
+                name: pokemonInfo.name,
+                emoji: pokemonInfo.emoji,
+                rarity: pokemonInfo.rarity,
+                catchTime: Date.now(),
+                lat: playerLatLng.lat,
+                lng: playerLatLng.lng
+            });
+        }
+
+        function updatePlayerStats() {
+            document.getElementById('catch-count').textContent = caughtInventory.length;
+            
+            // 計算解鎖圖鑑數量
+            const uniqueIds = new Set(caughtInventory.map(p => p.templateId));
+            const progress = Math.round((uniqueIds.size / POKEMON_DB.length) * 100);
+            document.getElementById('pokedex-progress').textContent = `${progress}%`;
+
+            // 簡單的等級公式: 每抓 5 隻升一級
+            const level = Math.floor(caughtInventory.length / 5) + 1;
+            document.getElementById('player-level').textContent = level;
+        }
+
+        window.openPokedex = function() {
+            const modal = document.getElementById('pokedex-modal');
+            const content = document.getElementById('pokedex-content');
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
+            
+            // Force reflow
+            void modal.offsetWidth;
+            
+            content.classList.remove('translate-y-full');
+            content.classList.add('translate-y-0');
+            renderPokedexGrid();
+        };
+
+        window.closePokedex = function() {
+            const modal = document.getElementById('pokedex-modal');
+            const content = document.getElementById('pokedex-content');
+            
+            content.classList.remove('translate-y-0');
+            content.classList.add('translate-y-full');
+            
+            setTimeout(() => {
+                modal.classList.add('hidden');
+                modal.classList.remove('flex');
+            }, 300); // match transition duration
+        };
+
+        function renderPokedexGrid() {
+            const grid = document.getElementById('pokedex-grid');
+            const empty = document.getElementById('pokedex-empty');
+            grid.innerHTML = '';
+
+            if (caughtInventory.length === 0) {
+                empty.classList.remove('hidden');
+                grid.classList.add('hidden');
+                return;
+            }
+
+            empty.classList.add('hidden');
+            grid.classList.remove('hidden');
+
+            // 依照捕捉時間反向排序 (新的在前面)
+            const sorted = [...caughtInventory].sort((a, b) => b.catchTime - a.catchTime);
+
+            sorted.forEach(p => {
+                let bgClass = "bg-white border-gray-200";
+                if(p.rarity === 'epic') bgClass = "bg-purple-50 border-purple-300 shadow-[0_0_10px_rgba(192,132,252,0.3)]";
+                else if(p.rarity === 'rare') bgClass = "bg-yellow-50 border-yellow-300 shadow-[0_0_10px_rgba(250,204,21,0.3)]";
+
+                const dateStr = new Date(p.catchTime).toLocaleDateString('zh-TW', { month: 'short', day: 'numeric' });
+
+                const card = document.createElement('div');
+                card.className = `flex flex-col items-center justify-center p-3 rounded-2xl border-2 ${bgClass}`;
+                card.innerHTML = `
+                    <div class="text-4xl mb-1">${p.emoji}</div>
+                    <div class="text-xs font-bold text-gray-800">${p.name}</div>
+                    <div class="text-[9px] text-gray-400 mt-1">${dateStr}</div>
+                `;
+                grid.appendChild(card);
+            });
+        }
+
+        // 自訂 Toast 訊息提示
+        window.showToast = function(message, type = 'info') {
+            const container = document.getElementById('toast-container');
+            const toast = document.createElement('div');
+            
+            let bgClass, iconClass;
+            if(type === 'error') { bgClass = 'bg-red-600'; iconClass = 'fa-triangle-exclamation'; }
+            else if(type === 'success') { bgClass = 'bg-green-500'; iconClass = 'fa-circle-check'; }
+            else { bgClass = 'bg-gray-800'; iconClass = 'fa-circle-info text-blue-300'; }
+
+            toast.className = `${bgClass} text-white px-4 py-3 rounded-2xl shadow-xl text-sm transition-all duration-300 transform -translate-y-4 opacity-0 flex items-center gap-3 w-full font-medium`;
+            toast.innerHTML = `<i class="fa-solid ${iconClass} text-lg"></i> <span>${message}</span>`;
+            
+            container.appendChild(toast);
+            
+            requestAnimationFrame(() => {
+                toast.classList.remove('opacity-0', '-translate-y-4');
+                toast.classList.add('opacity-100', 'translate-y-0');
+            });
+
+            setTimeout(() => {
+                toast.classList.remove('opacity-100', 'translate-y-0');
+                toast.classList.add('opacity-0', '-translate-y-4');
+                setTimeout(() => toast.remove(), 300);
+            }, 3000);
+        };
+
+        async function initSystem() {
+            try {
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+                userId = auth.currentUser?.uid;
+                
+                initMap();
+                loadInventoryFromFirebase();
+            } catch (error) {
+                console.error("系統初始化失敗:", error);
+                window.showToast("資料庫連線失敗，將以離線模式啟動地圖", "error");
+                initMap(); 
+            }
+        }
+
+        window.onload = initSystem;
+    </script>
+</body>
+</html>
